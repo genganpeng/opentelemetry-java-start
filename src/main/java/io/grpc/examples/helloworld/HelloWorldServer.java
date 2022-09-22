@@ -17,16 +17,27 @@ package io.grpc.examples.helloworld;/*
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Scope;
+import io.opentelemetry.semconv.trace.attributes.SemanticAttributes;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 /**
  * Server that manages startup/shutdown of a {@code Greeter} server.
  */
 public class HelloWorldServer {
-  private static final Logger logger = Logger.getLogger(HelloWorldServer.class.getName());
-
+  private static final Logger logger = LoggerFactory.getLogger(HelloWorldServer.class.getName());
+  private static final OpenTelemetry openTelemetry = ExampleConfiguration.initOpenTelemetry();
   private Server server;
 
   private void start() throws IOException {
@@ -81,6 +92,44 @@ public class HelloWorldServer {
     @Override
     public void sayHello(HelloRequest req, StreamObserver<HelloReply> responseObserver) {
       HelloReply reply = HelloReply.newBuilder().setMessage("Hello " + req.getName()).build();
+      Tracer tracer =
+              openTelemetry.getTracer("instrumentation-library-name", "1.0.0");
+      Span span = tracer.spanBuilder("my span").startSpan();
+
+      // Make the span the current span
+      try (Scope ss = span.makeCurrent()) {
+        // In this scope, the span is the current/active span
+        span.setAttribute(SemanticAttributes.HTTP_METHOD, "grpc");
+      } finally {
+        span.end();
+      }
+
+      // Gets or creates a named meter instance
+      Meter meter = openTelemetry.meterBuilder("instrumentation-library-name")
+              .setInstrumentationVersion("1.0.0")
+              .build();
+      // Build counter e.g. LongCounter
+      LongCounter counter = meter
+              .counterBuilder("processed_jobs")
+              .setDescription("Processed jobs")
+              .setUnit("1")
+              .build();
+      // It is recommended that the API user keep a reference to Attributes they will record against
+      Attributes attributes = Attributes.of(AttributeKey.stringKey("key"), "value");
+      // Record data
+      counter.add(123, attributes);
+
+      meter
+              .gaugeBuilder("cpu_usage")
+              .setDescription("CPU Usage")
+              .setUnit("ms")
+              .buildWithCallback(measurement -> {
+                measurement.record(2.0, Attributes.of(AttributeKey.stringKey("cpuKey"), "value"));
+              });
+
+      logger.info("say Hello!");
+
+
       responseObserver.onNext(reply);
       responseObserver.onCompleted();
     }
